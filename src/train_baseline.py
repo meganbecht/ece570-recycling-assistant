@@ -13,26 +13,33 @@ import matplotlib.pyplot as plt
 from huggingface_hub import snapshot_download
 from PIL import ImageFile
 
+#i turn this on so PIL doesn't crash if it runs into a weird/truncated image
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+#i set my seed stuff here so my shuffles and results are repeatable
 SEED = 570
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
+#this is the dataset repo i'm pulling from huggingface
 HF_REPO_ID = "garythung/trashnet"
 
+#these caps let me run a smaller/faster training run if i want
 MAX_TRAIN = 800
 MAX_TEST = 200
 
+#these are the basic training settings i'm using for this script
 BATCH_SIZE = 32
 EPOCHS = 5
 LR = 1e-3
 NUM_WORKERS = 0
 
+#this just hides that annoying symlink warning on windows
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 
+#this draws and saves a confusion matrix image so i can use it in slides/paper
 def plot_confusion(cm, labels, out_path):
     plt.figure(figsize=(8, 6))
     plt.imshow(cm, interpolation="nearest")
@@ -48,6 +55,7 @@ def plot_confusion(cm, labels, out_path):
     plt.close()
 
 
+#this draws and saves the training loss curve across epochs
 def plot_loss_curve(losses, out_path):
     plt.figure(figsize=(7, 4))
     plt.plot(range(1, len(losses) + 1), losses, marker="o")
@@ -59,19 +67,27 @@ def plot_loss_curve(losses, out_path):
     plt.close()
 
 
+#this checks if a directory looks like an ImageFolder dataset (class subfolders with images)
 def has_class_folders(path: str) -> bool:
     if not os.path.isdir(path):
         return False
+
+    #i ignore mac junk folders that sometimes show up after extraction
     ignore_dirs = {"__MACOSX"}
+
     subdirs = []
     for d in os.listdir(path):
         full = os.path.join(path, d)
         if os.path.isdir(full) and d not in ignore_dirs:
             subdirs.append(full)
+
+    #if there aren't at least 2 class folders, this probably isn't the dataset root
     if len(subdirs) < 2:
         return False
 
     img_exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+    #i confirm that multiple class folders actually contain image files
     count_with_imgs = 0
     for sd in subdirs:
         for root, _, files in os.walk(sd):
@@ -83,9 +99,11 @@ def has_class_folders(path: str) -> bool:
             if len(real_imgs) > 0:
                 count_with_imgs += 1
                 break
+
     return count_with_imgs >= 2
 
 
+#this looks for a zip/tar archive inside the downloaded huggingface snapshot
 def find_archive(repo_dir: str) -> str | None:
     for root, _, files in os.walk(repo_dir):
         for f in files:
@@ -95,8 +113,11 @@ def find_archive(repo_dir: str) -> str | None:
     return None
 
 
+#this extracts the archive one time into an _extracted folder
 def extract_archive(archive_path: str, extract_dir: str) -> None:
     os.makedirs(extract_dir, exist_ok=True)
+
+    #i skip extraction if it looks like i already extracted before
     if any(os.scandir(extract_dir)):
         return
 
@@ -111,6 +132,7 @@ def extract_archive(archive_path: str, extract_dir: str) -> None:
         raise ValueError(f"unsupported archive type {archive_path}")
 
 
+#this tries a bunch of common folders to find where the class subfolders actually live
 def find_imagefolder_root(repo_dir: str) -> str:
     candidates = [
         os.path.join(repo_dir, "_extracted", "dataset-original"),
@@ -121,12 +143,16 @@ def find_imagefolder_root(repo_dir: str) -> str:
         os.path.join(repo_dir, "_extracted"),
         repo_dir,
     ]
+
+    #i first check the obvious spots
     for c in candidates:
         if has_class_folders(c):
             return c
 
+    #if i didn't find it, i look for an archive and extract it
     archive = find_archive(repo_dir)
     if archive is None:
+        #last fallback: scan deeper for any directory that looks like ImageFolder
         for root, dirs, _ in os.walk(repo_dir):
             for d in dirs:
                 cand = os.path.join(root, d)
@@ -139,6 +165,7 @@ def find_imagefolder_root(repo_dir: str) -> str:
     print("extracting to:", extract_dir)
     extract_archive(archive, extract_dir)
 
+    #after extraction, i search the extracted directory tree
     for root, dirs, _ in os.walk(extract_dir):
         for d in dirs:
             cand = os.path.join(root, d)
@@ -148,6 +175,7 @@ def find_imagefolder_root(repo_dir: str) -> str:
     raise FileNotFoundError(f"couldn't find class folders in {extract_dir}")
 
 
+#this filters out hidden files that break PIL (like .DS_Store or ._whatever)
 def is_valid_file(path: str) -> bool:
     base = os.path.basename(path)
     if base.startswith("."):
@@ -157,9 +185,12 @@ def is_valid_file(path: str) -> bool:
     return True
 
 
+#this runs evaluation on a dataloader and returns accuracy + confusion matrix
 def evaluate(model, loader, device):
     model.eval()
     all_preds, all_true = [], []
+
+    #i turn off gradients here because eval is inference-only
     with torch.no_grad():
         for xb, yb in loader:
             xb = xb.to(device)
@@ -167,68 +198,97 @@ def evaluate(model, loader, device):
             preds = torch.argmax(logits, dim=1).cpu().numpy()
             all_preds.extend(preds.tolist())
             all_true.extend(yb.numpy().tolist())
+
     acc = accuracy_score(all_true, all_preds)
     cm = confusion_matrix(all_true, all_preds)
     return acc, cm
 
 
 def main():
+    #i download the dataset snapshot into the huggingface cache
     repo_dir = snapshot_download(repo_id=HF_REPO_ID, repo_type="dataset")
+
+    #then i locate the folder that ImageFolder can actually load
     data_root = find_imagefolder_root(repo_dir)
 
-    train_tf = transforms.Compose([transforms.Resize((224, 224)), transforms.RandomHorizontalFlip(p=0.5),
-        transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    test_tf = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    #this is my training preprocessing (resize + light augmentation + normalize)
+    train_tf = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
 
+    #this is my test preprocessing (same resize/normalize but no augmentation)
+    test_tf = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
+
+    #i build the main dataset using the training transforms
     full_ds = ImageFolder(root=data_root, transform=train_tf, is_valid_file=is_valid_file)
     class_names = full_ds.classes
     num_classes = len(class_names)
 
+    #i shuffle indices so my train/test split isn't biased by folder ordering
     indices = list(range(len(full_ds)))
     random.shuffle(indices)
 
+    #i cap the split sizes to keep runs fast
     n_train = min(MAX_TRAIN, len(indices))
     n_test = min(MAX_TEST, max(0, len(indices) - n_train))
 
     train_idx = indices[:n_train]
     test_idx = indices[n_train:n_train + n_test]
 
+    #i rebuild the dataset with test transforms for evaluation
     full_ds_test = ImageFolder(root=data_root, transform=test_tf, is_valid_file=is_valid_file)
 
+    #i use Subset so i don't copy any data, i just point to the indices i want
     train_ds = Subset(full_ds, train_idx)
     test_ds = Subset(full_ds_test, test_idx)
 
+    #i wrap everything in dataloaders so training and evaluation are batched
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
+    #i pick gpu if i have it, otherwise cpu
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Device:", device)
 
+    #i start from a pretrained resnet18 and swap the last layer to match my 6 classes
     model = resnet18(weights="DEFAULT")
     model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
     model.to(device)
 
+    #standard multi-class setup: cross entropy + adam
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
+    #i store output plots in this folder
     os.makedirs("outputs", exist_ok=True)
 
     epoch_losses = []
     epoch_accs = []
 
-    # ---- Train for multiple epochs ----
+    #i train for multiple epochs and track loss + test accuracy each epoch
     for epoch in range(EPOCHS):
         model.train()
         running_loss = 0.0
 
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
+
             optimizer.zero_grad()
             logits = model(xb)
             loss = criterion(logits, yb)
+
             loss.backward()
             optimizer.step()
+
             running_loss += loss.item()
 
         avg_loss = running_loss / len(train_loader)
@@ -239,7 +299,7 @@ def main():
 
         print(f"Epoch {epoch+1}/{EPOCHS} loss={avg_loss:.4f} test_acc={acc:.4f}")
 
-    # ---- Final evaluation artifacts ----
+    #after training, i compute a final accuracy and save the artifacts
     final_acc, final_cm = evaluate(model, test_loader, device)
 
     cm_path = os.path.join("outputs", "confusion_matrix.png")
