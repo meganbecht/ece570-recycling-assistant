@@ -310,7 +310,7 @@ def build_guidance_html(labels, probs):
 
     return f"""
     <div class="guidance-card">
-        <h3>♻️ Disposal Guidance</h3>
+        <h3>Disposal Guidance</h3>
         <p><strong>Recommended class:</strong> {pred.capitalize()}</p>
         <p>{guidance}</p>
         {extra_note}
@@ -332,7 +332,7 @@ def predict_ui(img: Image.Image):
         """
         empty_guidance = """
         <div class="guidance-card">
-            <h3>♻️ Disposal Guidance</h3>
+            <h3>Disposal Guidance</h3>
             <p>Upload an image to receive a classification, confidence score, and recycling guidance.</p>
         </div>
         """
@@ -355,7 +355,7 @@ with gr.Blocks(title="Personal Recycling Assistant") as demo:
     #this is the hero banner at the top
     gr.HTML("""
     <div id="hero">
-        <h1>🌎 Personal Recycling Assistant ♻️</h1>
+        <h1>Personal Recycling Assistant</h1>
         <p>
             Upload a photo of an item to classify it into one of 6 waste categories:
             <strong>cardboard, glass, metal, paper, plastic, trash</strong>.
@@ -368,19 +368,19 @@ with gr.Blocks(title="Personal Recycling Assistant") as demo:
     with gr.Row():
         gr.HTML("""
         <div class="feature-card">
-            <h3>📷 Image Classification</h3>
+            <h3>Image Classification</h3>
             <p>Uses a fine-tuned ResNet-18 model to identify waste categories from photos.</p>
         </div>
         """)
         gr.HTML("""
         <div class="feature-card">
-            <h3>📊 Confidence + Top-3</h3>
+            <h3>Confidence + Top-3</h3>
             <p>Displays the most likely classes so the user can judge uncertainty.</p>
         </div>
         """)
         gr.HTML("""
         <div class="feature-card">
-            <h3>♻️ Practical Guidance</h3>
+            <h3>Practical Guidance</h3>
             <p>Returns category-specific recycling guidance to support better disposal choices.</p>
         </div>
         """)
