@@ -14,29 +14,33 @@ import matplotlib.pyplot as plt
 from huggingface_hub import snapshot_download
 from PIL import ImageFile
 
-# Robustness for odd image files
+#i turn this on so PIL won't crash if it hits a weird/truncated image in the dataset
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+#i set this env var to silence the huggingface symlink warning on windows
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-# -----------------------------
-# Config (CPU-friendly)
-# -----------------------------
+#i set my seed stuff here so my split/shuffle is repeatable
 SEED = 570
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
+#this is the dataset repo i'm pulling from huggingface
 HF_REPO_ID = "garythung/trashnet"
 
+#these are my basic training knobs for this checkpoint run
 BATCH_SIZE = 32
-EPOCHS = 5                 # faster than 10; still meaningful
-LR = 3e-4                  # good fine-tuning LR
+EPOCHS = 5
+LR = 3e-4
 WEIGHT_DECAY = 1e-4
-NUM_WORKERS = 0            # keep 0 on Windows
+NUM_WORKERS = 0
 
-PRINT_EVERY = 10           # print progress more often
+#this controls how often i print batch progress so it doesn't feel "stuck"
+PRINT_EVERY = 10
 
 
+#this saves a confusion matrix plot so i can include it in slides/paper
 def plot_confusion(cm, labels, out_path):
     plt.figure(figsize=(8, 6))
     plt.imshow(cm, interpolation="nearest")
@@ -52,6 +56,7 @@ def plot_confusion(cm, labels, out_path):
     plt.close()
 
 
+#this filters out hidden files that break PIL (like .DS_Store and __MACOSX junk)
 def is_valid_file(path: str) -> bool:
     base = os.path.basename(path)
     if base.startswith("."):
@@ -61,19 +66,27 @@ def is_valid_file(path: str) -> bool:
     return True
 
 
+#this checks if a folder looks like an ImageFolder root (multiple class folders with images)
 def has_class_folders(path: str) -> bool:
     if not os.path.isdir(path):
         return False
+
+    #i ignore mac extraction folders because they're not real classes
     ignore_dirs = {"__MACOSX"}
+
     subdirs = []
     for d in os.listdir(path):
         full = os.path.join(path, d)
         if os.path.isdir(full) and d not in ignore_dirs:
             subdirs.append(full)
+
+    #if i don't see multiple class folders, it's probably not the dataset root
     if len(subdirs) < 2:
         return False
 
     img_exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+    #i just need to find at least one real image in at least one class folder
     for sd in subdirs:
         for root, _, files in os.walk(sd):
             real_imgs = [
@@ -82,9 +95,11 @@ def has_class_folders(path: str) -> bool:
             ]
             if len(real_imgs) > 0:
                 return True
+
     return False
 
 
+#this searches the downloaded hf snapshot for a zip/tar archive
 def find_archive(repo_dir: str) -> str | None:
     for root, _, files in os.walk(repo_dir):
         for f in files:
@@ -94,8 +109,11 @@ def find_archive(repo_dir: str) -> str | None:
     return None
 
 
+#this extracts the archive once into an _extracted folder
 def extract_archive(archive_path: str, extract_dir: str) -> None:
     os.makedirs(extract_dir, exist_ok=True)
+
+    #if there's already stuff in the folder, i assume i extracted before and skip
     if any(os.scandir(extract_dir)):
         return
 
@@ -110,6 +128,7 @@ def extract_archive(archive_path: str, extract_dir: str) -> None:
         raise ValueError(f"unsupported archive type {archive_path}")
 
 
+#this tries common folder names and (if needed) extracts an archive to find the ImageFolder root
 def find_imagefolder_root(repo_dir: str) -> str:
     candidates = [
         os.path.join(repo_dir, "_extracted", "dataset-original"),
@@ -120,10 +139,13 @@ def find_imagefolder_root(repo_dir: str) -> str:
         os.path.join(repo_dir, "_extracted"),
         repo_dir,
     ]
+
+    #i check the easy obvious paths first
     for c in candidates:
         if has_class_folders(c):
             return c
 
+    #if i don't find it, i try extracting the first archive i can find
     archive = find_archive(repo_dir)
     if archive is None:
         raise FileNotFoundError(f"couldn't find class folders or archive in {repo_dir}")
@@ -131,6 +153,7 @@ def find_imagefolder_root(repo_dir: str) -> str:
     extract_dir = os.path.join(repo_dir, "_extracted")
     extract_archive(archive, extract_dir)
 
+    #after extraction, i scan for the real class-folder root
     for root, dirs, _ in os.walk(extract_dir):
         for d in dirs:
             cand = os.path.join(root, d)
@@ -140,9 +163,12 @@ def find_imagefolder_root(repo_dir: str) -> str:
     raise FileNotFoundError(f"couldn't find class folders in extracted dir {extract_dir}")
 
 
+#this runs a full pass over the loader and returns accuracy + confusion matrix
 def eval_accuracy(model, loader, device):
     model.eval()
     all_preds, all_true = [], []
+
+    #i turn off gradients for eval because it's inference-only
     with torch.no_grad():
         for xb, yb in loader:
             xb = xb.to(device)
@@ -150,20 +176,23 @@ def eval_accuracy(model, loader, device):
             preds = torch.argmax(logits, dim=1).cpu().numpy()
             all_preds.extend(preds.tolist())
             all_true.extend(yb.numpy().tolist())
+
     return accuracy_score(all_true, all_preds), confusion_matrix(all_true, all_preds)
 
 
 def main():
+    #i make sure my outputs folder exists so i can save the model + confusion matrix
     os.makedirs("outputs", exist_ok=True)
 
+    #i download the dataset snapshot into my hf cache
     print("Downloading dataset repo from HF:", HF_REPO_ID)
     repo_dir = snapshot_download(repo_id=HF_REPO_ID, repo_type="dataset")
+
+    #i find the folder that ImageFolder can load (where the class folders live)
     data_root = find_imagefolder_root(repo_dir)
     print("Using data root:", data_root)
 
-    # -----------------------------
-    # Faster CPU-friendly transforms
-    # -----------------------------
+    #this is my training preprocessing (fast cpu-friendly + a little augmentation)
     train_tf = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -172,6 +201,7 @@ def main():
                              std=[0.229, 0.224, 0.225]),
     ])
 
+    #this is my test preprocessing (no augmentation so evaluation stays consistent)
     test_tf = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
@@ -179,40 +209,52 @@ def main():
                              std=[0.229, 0.224, 0.225]),
     ])
 
-    # Full dataset (train transform)
+    #i load the full dataset with the training transform
     full_ds = ImageFolder(root=data_root, transform=train_tf, is_valid_file=is_valid_file)
     class_names = full_ds.classes
     num_classes = len(class_names)
+
     print("Classes:", class_names)
     print("Total images:", len(full_ds))
 
-    # 80/20 split (more data than CP1 subset)
+    #i do an 80/20 split so i train on most images and test on a held-out set
     n_total = len(full_ds)
     n_train = int(0.8 * n_total)
     n_test = n_total - n_train
     generator = torch.Generator().manual_seed(SEED)
 
     train_ds, test_indices_ds = random_split(full_ds, [n_train, n_test], generator=generator)
+
+    #i rebuild the test dataset using test transforms but keep the exact same held-out indices
     full_ds_test = ImageFolder(root=data_root, transform=test_tf, is_valid_file=is_valid_file)
     test_ds = torch.utils.data.Subset(full_ds_test, test_indices_ds.indices)
 
+    #i wrap the datasets with dataloaders so everything runs in batches
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
+    #i pick gpu if i have it, otherwise i just run on cpu
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Device:", device)
     print(f"Train batches per epoch: {len(train_loader)} | Test batches: {len(test_loader)}")
 
-    # Model
+    #i start from pretrained resnet18 and swap the last layer to match my class count
     model = resnet18(weights="DEFAULT")
     model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
     model.to(device)
 
+    #standard multiclass setup: cross entropy + adam
     criterion = torch.nn.CrossEntropyLoss()
+
+    #i add weight decay to help regularize during fine-tuning
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+    #i decay the learning rate later so training can refine instead of making big jumps
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.3)
 
+    #i keep track of the best test accuracy so i only save the best checkpoint
     best_acc = -1.0
+
     for epoch in range(EPOCHS):
         epoch_start = time.time()
         model.train()
@@ -231,10 +273,12 @@ def main():
 
             running_loss += loss.item()
 
+            #i print progress every so often so i can see it's still moving
             if batch_i % PRINT_EVERY == 0:
                 elapsed = time.time() - epoch_start
                 print(f"  batch {batch_i:>3}/{len(train_loader)} | loss={loss.item():.4f} | elapsed={elapsed:.1f}s")
 
+        #i step the scheduler once per epoch
         scheduler.step()
 
         avg_loss = running_loss / len(train_loader)
@@ -242,6 +286,7 @@ def main():
         epoch_time = time.time() - epoch_start
         print(f"Epoch {epoch+1}/{EPOCHS} DONE | avg_loss={avg_loss:.4f} | test_acc={acc:.4f} | epoch_time={epoch_time:.1f}s")
 
+        #if this is my best model so far, i save the checkpoint + confusion matrix
         if acc > best_acc:
             best_acc = acc
             torch.save(
